@@ -64,7 +64,10 @@ unrooted artifacts and require rebuilding them.
 
 Run `bash tests/nix-cache.sh` to verify that an application-only edit preserves
 the dependency derivation while an edit to a patched dependency invalidates it.
-The check uses a temporary source copy and does not compile anything.
+The check uses a temporary source copy and does not compile anything by default.
+Add `--build` to also build the package before and after the application edit;
+inspect the build log to confirm that only Rexia recompiles after artifacts are
+imported.
 
 ### Privileged local ports
 
