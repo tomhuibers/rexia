@@ -2,9 +2,14 @@
   description = "rexia: a native Linux client for Rex, built on GPUI and themed by Noctalia";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.crane.url = "github:ipetkov/crane";
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      crane,
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -17,7 +22,9 @@
       packages = forAllSystems (
         system:
         let
-          rexia = (pkgsFor system).callPackage ./nix/package.nix { };
+          rexia = (pkgsFor system).callPackage ./nix/package.nix {
+            craneLib = crane.mkLib (pkgsFor system);
+          };
         in
         {
           inherit rexia;
