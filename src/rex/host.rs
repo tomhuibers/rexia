@@ -118,6 +118,28 @@ impl HostModel {
         }
     }
 
+    fn reconcile_bootstrap_last(
+        &mut self,
+        selected: &Option<String>,
+        requested: &Option<String>,
+        offline_from: Option<Option<String>>,
+        live: &HashSet<String>,
+    ) {
+        // A reconnect is not a switch. A disconnected request counts only if
+        // its final destination actually survived bootstrap; failed requests
+        // restore the previous selection without manufacturing history.
+        if let Some(previous) = offline_from {
+            if previous.as_ref().is_some_and(|id| !live.contains(id)) {
+                self.last_selected = None;
+            } else if selected == requested && selected != &previous {
+                self.last_selected = previous;
+            }
+        } else if self.selected.as_ref().is_some_and(|id| !live.contains(id)) {
+            self.last_selected = None;
+        }
+        self.selected = selected.clone();
+    }
+
     /// Show the pinned tab as the session's active one, while it still exists.
     fn apply_pin(&mut self, session: &str) {
         let Some(pinned) = self.pins.get(session).cloned() else {
@@ -610,6 +632,9 @@ struct Host {
     workers: HashMap<String, Worker>,
     visible: bool,
     preferred: Option<String>,
+    /// Selection before a disconnected series of requests, reconciled after
+    /// bootstrap validates the final requested session.
+    offline_from: Option<Option<String>>,
     keymap_request: Option<Value>,
     theme: Option<TerminalTheme>,
     cursor: Option<CursorShape>,
@@ -630,6 +655,7 @@ async fn run(
         workers: HashMap::new(),
         visible: true,
         preferred,
+        offline_from: None,
         keymap_request: None,
         theme: None,
         cursor: None,
@@ -688,7 +714,14 @@ async fn run(
                     Ok(HostCommand::Reconnect) => { retry = 0; refused = None; break }
                     Ok(HostCommand::Select(id)) => {
                         host.preferred = Some(id.clone());
-                        host.shared.update(|m| m.select(id));
+                        host.shared.update(|m| {
+                            // Show the requested offline destination, but do not
+                            // commit history until the server confirms it exists.
+                            if m.selected.as_ref() != Some(&id) {
+                                host.offline_from.get_or_insert_with(|| m.selected.clone());
+                                m.selected = Some(id);
+                            }
+                        });
                     }
                     Ok(HostCommand::Visible(visible)) => host.visible = visible,
                     Ok(HostCommand::Keymap(request)) => host.keymap_request = Some(request),
@@ -902,11 +935,19 @@ impl Host {
         }
         let client_id = control.client_id().map(str::to_owned);
         let server = boot["server_status"].clone();
+        let requested = self.preferred.clone();
         let selected = selected
             .filter(|id| sessions.iter().any(|s| &s.session_id == id))
+            .or_else(|| {
+                self.offline_from
+                    .as_ref()
+                    .and_then(Clone::clone)
+                    .filter(|id| sessions.iter().any(|s| &s.session_id == id))
+            })
             .or_else(|| views.keys().next().cloned())
             .or_else(|| sessions.first().map(|s| s.session_id.clone()));
         self.preferred = None;
+        let offline_from = self.offline_from.take();
         let live: HashSet<_> = sessions.iter().map(|s| s.session_id.clone()).collect();
         self.workers.retain(|_, w| live.contains(&w.session_id));
         self.shared.update(|m| {
@@ -919,26 +960,26 @@ impl Host {
             for session in pinned {
                 m.apply_pin(&session);
             }
-            // Reconnection/initial bootstrap is not an explicit switch. If the
-            // selected session disappeared, the new default is a fresh attach.
-            if m.selected
-                .as_ref()
-                .is_some_and(|id| !m.sessions.iter().any(|s| &s.session_id == id))
-            {
-                m.last_selected = None;
-            }
-            m.selected = selected.clone();
+            // Do not commit selection/history until a missing view attaches.
             // Activity is re-read from scratch: reports made while away were missed.
             for block in m.blocks.values_mut() {
                 block.records.clear();
             }
             m.epoch += 1;
         });
-        if let Some(id) = selected
-            && !floors.views.contains_key(&id)
+        if let Some(id) = selected.as_ref()
+            && !floors.views.contains_key(id)
+            && let Err(error) = self.attach(control, floors, id).await
         {
-            self.attach(control, floors, &id).await?;
+            // A failed attach is not a successful offline switch. Keep the
+            // request for the next bootstrap, without changing the register.
+            self.offline_from = offline_from;
+            self.preferred = requested;
+            return Err(error);
         }
+        self.shared.update(|m| {
+            m.reconcile_bootstrap_last(&selected, &requested, offline_from, &live);
+        });
         self.update_owners();
         Ok(())
     }
@@ -1972,6 +2013,28 @@ mod tests {
         assert_eq!(other_client.last_selected, None);
         other_client.select("A".into());
         assert_eq!(other_client.last_selected, None);
+    }
+
+    #[test]
+    fn disconnected_requests_commit_only_a_live_final_destination() {
+        let live: HashSet<_> = ["A".to_owned(), "B".to_owned()].into_iter().collect();
+        let mut model = HostModel {
+            selected: Some("B".into()), // requested while offline
+            last_selected: Some("old-last".into()),
+            ..Default::default()
+        };
+        let a = Some("A".into());
+        let b = Some("B".into());
+        model.reconcile_bootstrap_last(&b, &b, Some(a.clone()), &live);
+        assert_eq!(model.last_selected, a);
+        // A stale requested target is refused; the previous live session wins.
+        model.selected = Some("missing".into());
+        model.reconcile_bootstrap_last(&b, &Some("missing".into()), Some(b.clone()), &live);
+        assert_eq!(model.selected, b);
+        assert_eq!(model.last_selected, a);
+        // A reconnect of the same selection does not change the register.
+        model.reconcile_bootstrap_last(&b, &None, None, &live);
+        assert_eq!(model.last_selected, a);
     }
 
     #[tokio::test]
