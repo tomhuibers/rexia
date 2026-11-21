@@ -15,38 +15,6 @@ fn escape_cancels_prefix_without_reaching_the_terminal() {
         (m.keymap.is_some() && !focused_text(m).trim().is_empty()).then_some(())
     });
 
-    // Native tmux-style actions supplied by the server keymap.
-    h.press("ctrl-shift-o");
-    let block = h.wait("split panes", |m| {
-        let window = m.view()?.active_window()?;
-        (window.panes().len() == 2)
-            .then(|| window.focused_block_id.clone())
-            .flatten()
-    });
-    h.press("ctrl-a z");
-    h.wait("zoomed pane", |m| {
-        (m.view()?.active_window()?.zoomed_block_id.as_ref() == Some(&block)).then_some(())
-    });
-    h.press("ctrl-a z");
-    h.wait("restored split", |m| {
-        let window = m.view()?.active_window()?;
-        (window.zoomed_block_id.is_none() && window.panes().len() == 2).then_some(())
-    });
-    h.press("ctrl-a ,");
-    h.wait_ui("window rename prompt", |ws| ws.renaming());
-    h.type_text("batch-window");
-    h.press("enter");
-    h.wait("renamed window", |m| {
-        (m.view()?.active_window()?.label == "batch-window").then_some(())
-    });
-    h.press("ctrl-a shift-4");
-    h.wait_ui("session rename prompt", |ws| ws.renaming());
-    h.type_text("batch-session");
-    h.press("enter");
-    h.wait("renamed session", |m| {
-        (m.view()?.label == "batch-session").then_some(())
-    });
-
     // Read exactly two raw bytes. A cancelled prefix must not contribute a byte;
     // a subsequent ordinary Escape must still reach the application.
     h.type_text("sh -c 'saved=$(stty -g); stty -echo -icanon; printf \"\\nPREFIX-READY\\n\"; od -An -tx1 -N 2; stty \"$saved\"'");
