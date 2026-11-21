@@ -142,6 +142,17 @@ impl HostModel {
         self.views.get(self.selected.as_ref()?)
     }
 
+    /// The focused pane in the tab this client actually displays for this session.
+    fn visible_focus(&self, session: &str) -> Option<&str> {
+        let window = self.views.get(session)?.active_window()?;
+        let focused = window.focused_block_id.as_deref()?;
+        window
+            .panes()
+            .iter()
+            .any(|pane| pane.block_id == focused)
+            .then_some(focused)
+    }
+
     pub fn session(&self, id: &str) -> Option<&SessionSummary> {
         self.sessions.iter().find(|s| s.session_id == id)
     }
@@ -604,6 +615,10 @@ struct Host {
     keymap_request: Option<Value>,
     theme: Option<TerminalTheme>,
     cursor: Option<CursorShape>,
+    /// An explicit switch made while disconnected, to report after bootstrap attaches it.
+    pending_focus: Option<String>,
+    /// Bootstrap's shown session, recorded only when the user first leaves it.
+    initial_focus: Option<String>,
 }
 
 async fn run(
@@ -624,6 +639,8 @@ async fn run(
         keymap_request: None,
         theme: None,
         cursor: None,
+        pending_focus: None,
+        initial_focus: None,
     };
     let mut token: Option<String> = None;
     let mut retry = 0u32;
@@ -679,7 +696,16 @@ async fn run(
                     Ok(HostCommand::Reconnect) => { retry = 0; refused = None; break }
                     Ok(HostCommand::Select(id)) => {
                         host.preferred = Some(id.clone());
-                        host.shared.update(|m| m.selected = Some(id));
+                        let changed = host.shared.update(|m| {
+                            let changed = m.selected.as_deref() != Some(&id);
+                            m.selected = Some(id.clone());
+                            changed
+                        });
+                        if changed {
+                            // Switching away and back while offline is no departure.
+                            host.pending_focus = (host.initial_focus.as_ref() != Some(&id))
+                                .then_some(id);
+                        }
                     }
                     Ok(HostCommand::Visible(visible)) => host.visible = visible,
                     Ok(HostCommand::Keymap(request)) => host.keymap_request = Some(request),
@@ -917,13 +943,70 @@ impl Host {
             }
             m.epoch += 1;
         });
-        if let Some(id) = selected
-            && !floors.views.contains_key(&id)
+        if let Some(id) = selected.as_ref()
+            && !floors.views.contains_key(id)
         {
-            self.attach(control, floors, &id).await?;
+            self.attach(control, floors, id).await?;
         }
         self.update_owners();
+        // Bootstrap's default selection is not a UI switch. Only replay an explicit
+        // switch queued while offline, and only if that session survived bootstrap.
+        for id in self.bootstrap_focus(selected) {
+            self.report_selection(control, &id);
+        }
         Ok(())
+    }
+
+    /// Bootstrap is not a switch. Only explicit offline navigation may emit focus,
+    /// with the previously visible session first if it still exists.
+    fn bootstrap_focus(&mut self, selected: Option<String>) -> Vec<String> {
+        let Some(pending) = self.pending_focus.take() else {
+            self.initial_focus = selected;
+            return Vec::new();
+        };
+        if selected.as_ref() != Some(&pending) {
+            // The requested session disappeared while offline. The fallback is
+            // implicit; remember it for its first explicit departure instead.
+            self.initial_focus = selected;
+            return Vec::new();
+        }
+        let mut reports = Vec::new();
+        if let Some(previous) = self.initial_focus.take()
+            && self.shared.read(|m| m.session(&previous).is_some())
+            && selected.as_ref() != Some(&previous)
+        {
+            reports.push(previous);
+        }
+        reports.push(pending);
+        reports
+    }
+
+    /// Record the block actually shown in this client's active tab (which may be pinned).
+    /// An empty or stale view has no block to report; never substitute another tab's block.
+    fn report_selection(&self, control: &Control, id: &str) {
+        let block = self.shared.read(|m| m.visible_focus(id).map(str::to_owned));
+        let Some(block) = block else { return };
+        // Queue in selection order without holding up the host loop while the server
+        // answers. Focus is an existing method, not tied to the negotiated API revision.
+        match control.start_call(
+            "session.focus_block",
+            json!({"session_id": id, "block_id": block}),
+            Duration::from_secs(3),
+        ) {
+            Ok(answer) => {
+                let shared = self.shared.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = answer.await
+                        && !client::is_disconnect(&error)
+                    {
+                        shared.notice(format!("Couldn't report session focus: {error:#}"));
+                    }
+                });
+            }
+            Err(error) => self
+                .shared
+                .notice(format!("Couldn't report session focus: {error:#}")),
+        }
     }
 
     async fn attach(&mut self, control: &Control, floors: &mut Floors, id: &str) -> Result<()> {
@@ -998,7 +1081,7 @@ impl Host {
 
     fn remove_session(&mut self, id: &str) {
         self.workers.retain(|_, w| w.session_id != id);
-        self.shared.update(|m| {
+        let fallback = self.shared.update(|m| {
             m.sessions.retain(|s| s.session_id != id);
             if let Some(view) = m.views.remove(id) {
                 for block in view.windows.iter().flat_map(|w| w.blocks()) {
@@ -1009,8 +1092,16 @@ impl Host {
             }
             if m.selected.as_deref() == Some(id) {
                 m.selected = m.sessions.first().map(|s| s.session_id.clone());
+                Some(m.selected.clone())
+            } else {
+                None
             }
         });
+        if let Some(selected) = fallback {
+            self.initial_focus = selected;
+        } else if self.initial_focus.as_deref() == Some(id) {
+            self.initial_focus = None;
+        }
     }
 
     async fn list_sessions(&mut self, control: &Control, floors: &mut Floors) -> Result<()> {
@@ -1250,7 +1341,19 @@ impl Host {
                 if !floors.views.contains_key(&id) {
                     self.attach(control, floors, &id).await?;
                 }
-                self.shared.update(|m| m.selected = Some(id));
+                let changed = self.shared.update(|m| {
+                    let changed = m.selected.as_deref() != Some(&id);
+                    m.selected = Some(id.clone());
+                    changed
+                });
+                if changed {
+                    // The initial tab was visible but bootstrap itself is not a
+                    // navigation. Record it only when an explicit switch leaves it.
+                    if let Some(previous) = self.initial_focus.take() {
+                        self.report_selection(control, &previous);
+                    }
+                    self.report_selection(control, &id);
+                }
             }
             HostCommand::CreateSession { label, reply } => {
                 let layout = shell_layout_for(self.endpoint.is_local(), None);
@@ -1267,7 +1370,13 @@ impl Host {
                             .to_owned();
                         self.list_sessions(control, floors).await?;
                         self.attach(control, floors, &id).await?;
-                        self.shared.update(|m| m.selected = Some(id));
+                        // Creation is a real switch: preserve the initial displayed
+                        // session before the newly created one, in selection order.
+                        if let Some(previous) = self.initial_focus.take() {
+                            self.report_selection(control, &previous);
+                        }
+                        self.shared.update(|m| m.selected = Some(id.clone()));
+                        self.report_selection(control, &id);
                         if let Some(reply) = reply {
                             let _ = reply.send(Ok(created));
                         }
@@ -2027,6 +2136,260 @@ mod tests {
         );
         set_startup_command(None);
         assert_eq!(shell_layout_for(true, None), shell_layout());
+    }
+
+    fn test_host() -> Host {
+        let (wake, _) = flume::bounded(1);
+        let shared = Shared {
+            model: Arc::new(Mutex::new(HostModel::default())),
+            wake,
+        };
+        for (session, block) in [("a", "one"), ("b", "two"), ("c", "three")] {
+            let view: View = serde_json::from_value(json!({
+                "revision": 1, "active_window_id": "w",
+                "windows": [{"window_id": "w", "focused_block_id": block,
+                    "layers": [{"kind": "tiled", "layout": {"rect": [0,0,1,1], "block_id": block}}]}]
+            })).unwrap();
+            shared.update(|m| {
+                m.views.insert(session.into(), view);
+            });
+        }
+        shared.update(|m| m.selected = Some("a".into()));
+        Host {
+            endpoint: Endpoint::parse("unix:///tmp/rexia-focus-unit.sock").unwrap(),
+            identity: Identity::default(),
+            shared,
+            link: Arc::default(),
+            workers: HashMap::new(),
+            visible: true,
+            preferred: None,
+            keymap_request: None,
+            theme: None,
+            cursor: None,
+            pending_focus: None,
+            initial_focus: Some("a".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn selection_queues_in_order_without_waiting_and_failure_keeps_navigation() {
+        let (control, mut requests) = Control::test_pair();
+        let mut host = test_host();
+        let mut floors = Floors::default();
+        for id in ["a", "b", "c"] {
+            floors.views.insert(id.into(), 0);
+        }
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            host.handle_command(&control, &mut floors, HostCommand::Select("b".into())),
+        )
+        .await
+        .expect("selection waited for a focus reply")
+        .unwrap();
+        assert_eq!(
+            host.shared.read(|m| m.selected.clone()).as_deref(),
+            Some("b")
+        );
+        let message = |request: tokio_tungstenite::tungstenite::Message| -> Value {
+            serde_json::from_str(request.to_text().unwrap()).unwrap()
+        };
+        let first = message(requests.try_recv().unwrap());
+        let second = message(requests.try_recv().unwrap());
+        assert_eq!(first["payload"]["block_id"], "one");
+        assert_eq!(second["payload"]["block_id"], "two");
+        // Neither response has arrived, yet another selection must still complete.
+        host.handle_command(&control, &mut floors, HostCommand::Select("c".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            host.shared.read(|m| m.selected.clone()).as_deref(),
+            Some("c")
+        );
+        assert_eq!(
+            message(requests.try_recv().unwrap())["payload"]["block_id"],
+            "three"
+        );
+        host.handle_command(&control, &mut floors, HostCommand::Select("c".into()))
+            .await
+            .unwrap();
+        assert!(
+            requests.try_recv().is_err(),
+            "same-session selection must not report again"
+        );
+        control.test_response(json!({"type":"response", "id": second["id"],
+            "error": {"code":"bad_request", "message":"focus refused"}}));
+        tokio::task::yield_now().await;
+        assert_eq!(
+            host.shared.read(|m| m.selected.clone()).as_deref(),
+            Some("c")
+        );
+        assert!(
+            host.shared
+                .read(|m| m.notices.iter().any(|n| n.contains("focus refused")))
+        );
+    }
+
+    #[test]
+    fn offline_switch_preserves_initial_before_destination_and_skips_invalid() {
+        let mut host = test_host();
+        host.shared.update(|m| {
+            m.sessions = ["a", "b"]
+                .map(|id| SessionSummary {
+                    session_id: id.into(),
+                    label: String::new(),
+                })
+                .to_vec()
+        });
+        host.pending_focus = Some("b".into());
+        assert_eq!(host.bootstrap_focus(Some("b".into())), ["a", "b"]);
+        assert_eq!(host.initial_focus, None);
+        host.initial_focus = Some("a".into());
+        host.pending_focus = Some("b".into());
+        host.shared
+            .update(|m| m.sessions.retain(|s| s.session_id != "a"));
+        assert_eq!(host.bootstrap_focus(Some("b".into())), ["b"]);
+        assert!(host.bootstrap_focus(Some("b".into())).is_empty());
+        assert_eq!(host.initial_focus.as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn deleted_destinations_preserve_fallback_for_next_departure() {
+        for offline in [true, false] {
+            let (control, mut requests) = Control::test_pair();
+            let mut host = test_host();
+            host.shared.update(|m| {
+                m.sessions = ["a", "b", "c"]
+                    .map(|id| SessionSummary {
+                        session_id: id.into(),
+                        label: id.into(),
+                    })
+                    .to_vec();
+            });
+            let expected;
+            if offline {
+                host.pending_focus = Some("gone".into());
+                assert!(host.bootstrap_focus(Some("a".into())).is_empty());
+                expected = "one";
+            } else {
+                host.remove_session("a");
+                assert_eq!(
+                    host.shared.read(|m| m.selected.clone()).as_deref(),
+                    Some("b")
+                );
+                expected = "two";
+            }
+            let mut floors = Floors::default();
+            floors.views.insert("c".into(), 0);
+            host.handle_command(&control, &mut floors, HostCommand::Select("c".into()))
+                .await
+                .unwrap();
+            let reports: Vec<Value> = (0..2)
+                .map(|_| {
+                    serde_json::from_str(requests.try_recv().unwrap().to_text().unwrap()).unwrap()
+                })
+                .collect();
+            assert_eq!(reports[0]["payload"]["block_id"], expected);
+            assert_eq!(reports[1]["payload"]["block_id"], "three");
+            assert!(requests.try_recv().is_err());
+            assert_eq!(host.initial_focus, None);
+        }
+        let mut host = test_host();
+        host.pending_focus = Some("gone".into());
+        assert!(host.bootstrap_focus(Some("c".into())).is_empty());
+        assert_eq!(host.initial_focus.as_deref(), Some("c"));
+    }
+
+    #[tokio::test]
+    async fn create_then_select_reports_initial_created_and_destination_in_order() {
+        let (control, mut requests) = Control::test_pair();
+        let mut host = test_host();
+        host.shared.update(|m| {
+            m.sessions = ["a", "b", "c"]
+                .map(|id| SessionSummary {
+                    session_id: id.into(),
+                    label: id.into(),
+                })
+                .to_vec();
+        });
+        let mut floors = Floors::default();
+        for id in ["a", "b", "c"] {
+            floors.views.insert(id.into(), 0);
+        }
+        let response_control = control.clone();
+        let task = tokio::spawn(async move {
+            host.handle_command(
+                &control,
+                &mut floors,
+                HostCommand::CreateSession {
+                    label: None,
+                    reply: None,
+                },
+            )
+            .await
+            .unwrap();
+            host.handle_command(&control, &mut floors, HostCommand::Select("c".into()))
+                .await
+                .unwrap();
+            host
+        });
+        for (method, payload) in [
+            ("session.create", json!({"session_id": "b"})),
+            (
+                "session.list",
+                json!({"sessions": [
+                    {"session_id":"a"}, {"session_id":"b"}, {"session_id":"c"}
+                ]}),
+            ),
+            (
+                "session.attach",
+                json!({"view": {
+                    "revision": 1, "active_window_id": "w",
+                    "windows": [{"window_id":"w", "focused_block_id":"two",
+                        "layers":[{"kind":"tiled", "layout":{"rect":[0,0,1,1],"block_id":"two"}}]
+                    }]
+                }}),
+            ),
+        ] {
+            let request: Value =
+                serde_json::from_str(requests.recv().await.unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(request["method"], method);
+            response_control
+                .test_response(json!({"type":"response", "id":request["id"], "payload":payload}));
+        }
+        let host = task.await.unwrap();
+        let reported: Vec<_> = (0..3)
+            .map(|_| {
+                let request: Value =
+                    serde_json::from_str(requests.try_recv().unwrap().to_text().unwrap()).unwrap();
+                request["payload"]["block_id"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(reported, ["one", "two", "three"]);
+        assert_eq!(host.initial_focus, None);
+    }
+
+    #[test]
+    fn selection_focus_uses_visible_pinned_tab_without_fallback() {
+        let mut model = HostModel::default();
+        let view: View = serde_json::from_value(json!({
+            "revision": 1, "active_window_id": "a",
+            "windows": [
+                {"window_id": "a", "focused_block_id": "one", "layers": [{"kind": "tiled",
+                    "layout": {"block_id": "one", "rect": [0,0,1,1]}}]},
+                {"window_id": "b", "focused_block_id": "two", "layers": [{"kind": "tiled",
+                    "layout": {"block_id": "two", "rect": [0,0,1,1]}}]}
+            ]
+        }))
+        .unwrap();
+        model.views.insert("s".into(), view);
+        assert_eq!(model.visible_focus("s"), Some("one"));
+        model.pin("s".into(), Some("b".into()));
+        assert_eq!(model.visible_focus("s"), Some("two"));
+        model.views.get_mut("s").unwrap().windows[1].focused_block_id = Some("gone".into());
+        assert_eq!(model.visible_focus("s"), None);
+        model.views.get_mut("s").unwrap().windows.clear();
+        assert_eq!(model.visible_focus("s"), None);
+        assert_eq!(model.visible_focus("deleted"), None);
     }
 
     #[test]

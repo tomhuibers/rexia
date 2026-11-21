@@ -332,6 +332,31 @@ impl Control {
         })
     }
 
+    /// In-memory transport for host tests: exercise real request queuing and reply
+    /// dispatch without opening a socket or requiring a running Rex server.
+    #[cfg(test)]
+    pub(super) fn test_pair() -> (Self, mpsc::UnboundedReceiver<Message>) {
+        let (outgoing, requests) = mpsc::unbounded_channel();
+        (
+            Self {
+                outgoing,
+                pending: Arc::default(),
+                next_id: Arc::default(),
+                welcome: Welcome {
+                    api_revision: API_REVISION,
+                    ..Default::default()
+                },
+            },
+            requests,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_response(&self, response: Value) {
+        let (events, _) = mpsc::unbounded_channel();
+        dispatch(&response.to_string(), &self.pending, &events).expect("test response");
+    }
+
     /// The value of a successful call.
     pub async fn value(&self, method: &str, payload: Value) -> Result<Value> {
         Ok(self.call(method, payload).await?.value)
