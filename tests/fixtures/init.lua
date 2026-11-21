@@ -1,6 +1,8 @@
 -- Test configuration for rexia's live tests.
 rex.bind("ctrl+a>c", "client.tab.new")
 rex.bind("ctrl+a>z", "pane.zoom")
+rex.bind("ctrl+a>,", "client.tab.rename")
+rex.bind("ctrl+a>shift+4", "session.rename")
 rex.mode("resize", { exclusive = true })
 rex.bind("ctrl+alt+r", "client.mode.enter", { name = "resize" })
 rex.bind("resize/left", "pane.resize", { direction = "left" })

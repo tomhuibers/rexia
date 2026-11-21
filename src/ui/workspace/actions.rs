@@ -211,6 +211,11 @@ impl Workspace {
                 let had_prefix = !self.pending.is_empty();
                 self.pending.clear();
                 if had_prefix {
+                    // Cancel an unfinished sequence without sending Escape to the
+                    // terminal (where it may interrupt the running application).
+                    if stroke.is_escape() {
+                        cx.stop_propagation();
+                    }
                     cx.notify();
                 }
                 // Escape leaves a mode that doesn't bind it.
