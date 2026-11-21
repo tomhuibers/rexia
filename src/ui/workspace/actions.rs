@@ -625,6 +625,14 @@ impl Workspace {
                 }
                 self.select_session(self.active, id.to_owned(), cx);
             }
+            "session.last" => {
+                let id = model.last_selected.as_ref()
+                    .ok_or_else(|| refused("There's no last session on this host"))?;
+                if !model.sessions.iter().any(|s| &s.session_id == id) {
+                    return Err(refused("The last session no longer exists on this host"));
+                }
+                self.select_session(self.active, id.clone(), cx);
+            }
             "session.next" | "session.previous" => {
                 let ids: Vec<_> = model
                     .sessions

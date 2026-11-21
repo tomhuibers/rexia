@@ -298,6 +298,13 @@ pub const ACTIONS: &[ActionDef] = &[
         [(&["ctrl+alt+shift+up"], None)]
     ),
     action!(
+        "session.last",
+        "Last Session",
+        "Session",
+        "return to last viewed session toggle tmux",
+        []
+    ),
+    action!(
         "session.refresh",
         "Refresh Sessions",
         "Session",

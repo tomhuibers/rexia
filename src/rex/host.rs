@@ -87,6 +87,9 @@ pub struct HostModel {
     pub sessions: Vec<SessionSummary>,
     pub views: HashMap<String, View>,
     pub selected: Option<String>,
+    /// The preceding session shown by this client on this host, not Rex's
+    /// principal-wide focus-history cursor. Only successful changes replace it.
+    pub last_selected: Option<String>,
     pub panes: HashMap<String, PaneHandle>,
     pub blocks: HashMap<String, BlockState>,
     /// Errors from actions, for the UI to show and clear.
@@ -109,6 +112,12 @@ pub struct HostModel {
 }
 
 impl HostModel {
+    fn select(&mut self, id: String) {
+        if self.selected.as_ref() != Some(&id) {
+            self.last_selected = self.selected.replace(id);
+        }
+    }
+
     /// Show the pinned tab as the session's active one, while it still exists.
     fn apply_pin(&mut self, session: &str) {
         let Some(pinned) = self.pins.get(session).cloned() else {
@@ -679,7 +688,7 @@ async fn run(
                     Ok(HostCommand::Reconnect) => { retry = 0; refused = None; break }
                     Ok(HostCommand::Select(id)) => {
                         host.preferred = Some(id.clone());
-                        host.shared.update(|m| m.selected = Some(id));
+                        host.shared.update(|m| m.select(id));
                     }
                     Ok(HostCommand::Visible(visible)) => host.visible = visible,
                     Ok(HostCommand::Keymap(request)) => host.keymap_request = Some(request),
@@ -910,6 +919,14 @@ impl Host {
             for session in pinned {
                 m.apply_pin(&session);
             }
+            // Reconnection/initial bootstrap is not an explicit switch. If the
+            // selected session disappeared, the new default is a fresh attach.
+            if m.selected
+                .as_ref()
+                .is_some_and(|id| !m.sessions.iter().any(|s| &s.session_id == id))
+            {
+                m.last_selected = None;
+            }
             m.selected = selected.clone();
             // Activity is re-read from scratch: reports made while away were missed.
             for block in m.blocks.values_mut() {
@@ -1008,6 +1025,9 @@ impl Host {
                 }
             }
             if m.selected.as_deref() == Some(id) {
+                // tmux clears the register when destroying the attached session;
+                // an implicit fallback is not a switch away from a live session.
+                m.last_selected = None;
                 m.selected = m.sessions.first().map(|s| s.session_id.clone());
             }
         });
@@ -1247,10 +1267,17 @@ impl Host {
                 }
             }
             HostCommand::Select(id) => {
+                // A selection queued before a destroy event must not resurrect
+                // a removed session from an old cached view.
+                if self.shared.read(|m| m.session(&id).is_none()) {
+                    self.shared
+                        .notice(format!("Session {id} is no longer available"));
+                    return Ok(());
+                }
                 if !floors.views.contains_key(&id) {
                     self.attach(control, floors, &id).await?;
                 }
-                self.shared.update(|m| m.selected = Some(id));
+                self.shared.update(|m| m.select(id));
             }
             HostCommand::CreateSession { label, reply } => {
                 let layout = shell_layout_for(self.endpoint.is_local(), None);
@@ -1267,7 +1294,7 @@ impl Host {
                             .to_owned();
                         self.list_sessions(control, floors).await?;
                         self.attach(control, floors, &id).await?;
-                        self.shared.update(|m| m.selected = Some(id));
+                        self.shared.update(|m| m.select(id));
                         if let Some(reply) = reply {
                             let _ = reply.send(Ok(created));
                         }
@@ -1925,6 +1952,27 @@ async fn stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_session_is_one_register_per_client_not_focus_history() {
+        let mut client = HostModel::default();
+        let mut other_client = HostModel::default();
+        client.select("A".into());
+        assert_eq!(client.last_selected, None); // initial attach
+        client.select("B".into());
+        assert_eq!(client.last_selected.as_deref(), Some("A"));
+        client.select("A".into()); // l
+        client.select("B".into()); // l
+        client.select("C".into()); // picker selecting an existing session
+        assert_eq!(client.last_selected.as_deref(), Some("B"));
+        client.select("C".into()); // same session does not clobber last
+        assert_eq!(client.last_selected.as_deref(), Some("B"));
+        client.select("B".into()); // l
+        assert_eq!(client.last_selected.as_deref(), Some("C"));
+        assert_eq!(other_client.last_selected, None);
+        other_client.select("A".into());
+        assert_eq!(other_client.last_selected, None);
+    }
 
     #[tokio::test]
     async fn new_shell_directory_prefers_live_process_and_handles_missing_data() {
