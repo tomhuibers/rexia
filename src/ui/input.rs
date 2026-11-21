@@ -29,6 +29,8 @@ pub struct TextInput {
     placeholder: SharedString,
     /// Shown as dots and never copied: passwords.
     secret: bool,
+    /// Opt-in navigation aliases for native list pickers only.
+    list_navigation: bool,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -71,6 +73,17 @@ fn word_end(text: &str, at: usize) -> usize {
             .unwrap_or(rest.len())
 }
 
+fn list_navigation_step(enabled: bool, key: &str, modifiers: gpui::Modifiers) -> Option<i32> {
+    if !enabled || !modifiers.control || modifiers.alt || modifiers.shift || modifiers.platform {
+        return None;
+    }
+    match key {
+        "p" => Some(-1),
+        "n" => Some(1),
+        _ => None,
+    }
+}
+
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
@@ -80,7 +93,14 @@ impl TextInput {
             anchor: None,
             placeholder: placeholder.into(),
             secret: false,
+            list_navigation: false,
         }
+    }
+
+    /// Enable Ctrl+P/N alongside arrow keys for a native list picker.
+    pub fn list_navigation(mut self) -> Self {
+        self.list_navigation = true;
+        self
     }
 
     /// A field for a password: dots on screen, and nothing copied from it.
@@ -153,6 +173,11 @@ impl TextInput {
         let keystroke = &event.keystroke;
         let m = keystroke.modifiers;
         let ctrl = m.control || m.platform;
+        if let Some(step) = list_navigation_step(self.list_navigation, &keystroke.key, m) {
+            cx.emit(InputEvent::Navigate(step));
+            cx.stop_propagation();
+            return;
+        }
         let before = self.text.clone();
         let handled = match keystroke.key.as_str() {
             "enter" => {
@@ -372,6 +397,39 @@ impl Render for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_navigation_requires_opt_in_and_plain_control() {
+        let ctrl = gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert_eq!(list_navigation_step(true, "p", ctrl), Some(-1));
+        assert_eq!(list_navigation_step(true, "n", ctrl), Some(1));
+        assert_eq!(list_navigation_step(false, "n", ctrl), None);
+        assert_eq!(list_navigation_step(false, "p", ctrl), None);
+        assert_eq!(list_navigation_step(true, "x", ctrl), None);
+        for modifiers in [
+            gpui::Modifiers::default(),
+            gpui::Modifiers {
+                platform: true,
+                ..Default::default()
+            },
+            gpui::Modifiers { alt: true, ..ctrl },
+            gpui::Modifiers {
+                shift: true,
+                ..ctrl
+            },
+            gpui::Modifiers {
+                platform: true,
+                ..ctrl
+            },
+        ] {
+            for key in ["n", "p"] {
+                assert_eq!(list_navigation_step(true, key, modifiers), None);
+            }
+        }
+    }
 
     #[test]
     fn word_motions_skip_punctuation() {

@@ -786,7 +786,7 @@ impl Workspace {
         } else {
             kind.placeholder()
         };
-        let input = cx.new(|cx| TextInput::new(placeholder, cx));
+        let input = cx.new(|cx| TextInput::new(placeholder, cx).list_navigation());
         let subscription =
             cx.subscribe_in(&input, window, |ws, _, event: &InputEvent, window, cx| {
                 ws.on_list_input(event, window, cx);
