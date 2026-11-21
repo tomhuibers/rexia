@@ -147,7 +147,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
-    async fn relay_copies_both_directions_and_releases_listener() {
+    async fn relay_copies_both_directions_and_cancels_active_connections() {
         tokio::time::timeout(Duration::from_secs(3), async {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let local = listener.local_addr().unwrap();
@@ -165,9 +165,29 @@ mod tests {
             let mut response = Vec::new();
             client.read_to_end(&mut response).await.unwrap();
             assert_eq!(response, b"b");
+            // Leave a second connection open to exercise cancellation of the
+            // relay's child tasks, rather than only an already-finished copy.
+            let mut active_client = TcpStream::connect(local).await.unwrap();
+            let (mut active_server, _) = upstream.accept().await.unwrap();
+            active_client.write_all(b"c").await.unwrap();
+            let mut byte = [0];
+            active_server.read_exact(&mut byte).await.unwrap();
+            assert_eq!(&byte, b"c");
+
             task.abort();
+            // Joining observes the relay future being dropped, including its
+            // owned listener and JoinSet. Child cancellation may finish later.
             assert!(task.await.unwrap_err().is_cancelled());
-            assert!(TcpStream::connect(local).await.is_err());
+            for peer in [&mut active_client, &mut active_server] {
+                match peer.read(&mut byte).await {
+                    Ok(0) => {}
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+                    result => panic!("relay left an active connection open: {result:?}"),
+                }
+            }
+            // Do not probe `local` with a new connection: once released, the
+            // ephemeral port may belong to an unrelated parallel test. Check
+            // our established peers instead; their identity cannot be reused.
         })
         .await
         .unwrap();
