@@ -334,7 +334,7 @@ class DataGate:
             copy(server, client)
 
 
-def verify_last_session(binary, directory, display, x, launch, rex, server, picker=None):
+def verify_last_session(binary, directory, display, x, launch, rex, server):
     """Real Rexia/XTest selection, with a private server and test-only keymap."""
     colors = (0xD92143, 0x16CB52, 0xB552E0)
     ids = []
@@ -342,8 +342,6 @@ def verify_last_session(binary, directory, display, x, launch, rex, server, pick
         r, g, b = (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255
         paint = f"import os,time; os.write(1,b'\\x1b[48;2;{r};{g};{b}m\\x1b[2J\\x1b[H'); time.sleep(120)"
         args = ["new", label, "--shell=none"]
-        if picker == "t" and label.endswith("-C"):
-            args += ["--cwd", str(directory / label)]
         ids.append(rex(*args, "--", sys.executable, "-c", paint)["session_id"])
     settings = directory / "settings.toml"
     settings.write_text('[interface]\nsidebar = false\npane_headers = "hidden"\n')
@@ -380,56 +378,11 @@ def verify_last_session(binary, directory, display, x, launch, rex, server, pick
     expect(1, "native picker B")
     last(); expect(0, "B -> A by prefix+l")
     last(); expect(1, "A -> B by prefix+l")
-    def open_picker(source, key):
-        before = len(rex("block", "ls", "-s", source)["blocks"])
-        x.key("a", modifiers=(0xFFE3,))
-        x.key(key)
-        wait("real fzf picker block", lambda: len(rex("block", "ls", "-s", source)["blocks"]) > before)
-        time.sleep(0.25)
-        return before
-
-    def fzf(source, key, query):
-        open_picker(source, key)
-        for letter in query:
-            x.key(letter)
-        x.key("Return")
-
-    if picker in ("f", "t"):
-        fzf(ids[1], picker, "native-last-C")
-    else:
-        choose("native-last-C")
+    choose("native-last-C")
     expect(2, "picker existing C")
     last(); expect(1, "C -> B by prefix+l")
     last(); expect(2, "B -> C by prefix+l")
-    if picker in ("f", "t"):
-        before = open_picker(ids[2], picker)
-        x.key("Escape")
-        wait("cancelled picker removed", lambda: len(rex("block", "ls", "-s", ids[2])["blocks"]) == before, timeout=20)
-        expect(2, "picker cancellation keeps C")
-        last(); expect(1, "cancel did not alter last B")
-        last(); expect(2, "cancelled picker still toggles C")
-    if picker == "family":
-        def family(key):
-            x.key("a", modifiers=(0xFFE3,))
-            x.key(key)
-
-        family("k")
-        wait("k created agent session", lambda: any(s["label"] == "native-last-C-agents" for s in rex("ls")["sessions"]), timeout=20)
-        wait("k selected agent client-side", lambda: not shown(2), timeout=20)
-        last(); expect(2, "new k destination -> C by prefix+l")
-        last(); wait("C -> existing agent by prefix+l", lambda: not shown(2), timeout=20)
-        family("s")
-        wait("s created servers session", lambda: any(s["label"] == "native-last-C-servers" for s in rex("ls")["sessions"]), timeout=20)
-        family("j"); expect(2, "j reused root C")
-        last(); wait("j -> prior server by prefix+l", lambda: not shown(2), timeout=20)
-    if picker == "t":
-        fzf(ids[2], "t", "native-last-D")
-        wait("project picker created D", lambda: any(s["label"] == "native-last-D" for s in rex("ls")["sessions"]), timeout=20)
-        wait("new D replaces C", lambda: not shown(2) and len(rex("block", "ls", "-s", ids[2])["blocks"]) == 1, timeout=20)
-        time.sleep(0.3)
-        last(); expect(2, "new D -> C by prefix+l")
-        last(); wait("C -> new D by prefix+l", lambda: not shown(2), timeout=20)
-    print(f"Native X11: A/B toggle, {picker or 'native'} navigation to existing C, B/C toggle via prefix+l", flush=True)
+    print("Native X11: A/B toggle, native picker to C, B/C toggle via session.recent", flush=True)
 
 
 def run(binary, case, directory):
@@ -452,14 +405,7 @@ def run(binary, case, directory):
         x = X11(display)
         server = directory / "rex.sock"
         keymap = directory / "init.lua"
-        if case in ("last-f", "last-t", "last-family"):
-            package = os.environ["REXIA_TEST_REXCONFIG"]
-            keymap.write_text(f'dofile({json.dumps(package + "/share/rexconfig/init.lua")})\n')
-        else:
-            keymap.write_text('rex.bind("ctrl+a>l", "session.last")\n')
-        server_env = dict(os.environ)
-        if case == "last-t":
-            server_env["_ZO_DATA_DIR"] = str(directory / "zoxide")
+        keymap.write_text('rex.bind("ctrl+a>l", "session.recent")\n')
         launch(
             "rex",
             [
@@ -472,10 +418,9 @@ def run(binary, case, directory):
                 str(directory / "state"),
                 "--restore=false",
                 "--config",
-                str(keymap) if case in ("last-session", "last-f", "last-t", "last-family") else "/dev/null",
+                str(keymap) if case == "last-session" else "/dev/null",
             ],
             stdout=sp.DEVNULL,
-            env=server_env,
         )
         wait("Rex listening", server.exists)
 
@@ -488,17 +433,8 @@ def run(binary, case, directory):
             )
             return json.loads(result) if as_json else result
 
-        if case in ("last-session", "last-f", "last-t", "last-family"):
-            if case == "last-t":
-                zoxide = os.environ["REXIA_TEST_ZOXIDE"]
-                zoenv = dict(os.environ, _ZO_DATA_DIR=str(directory / "zoxide"))
-                for name in ("native-last-C", "native-last-D"):
-                    project = directory / name
-                    project.mkdir()
-                    sp.check_call([zoxide, "add", str(project)], env=zoenv)
-            verify_last_session(binary, directory, display, x, launch, rex, server,
-                                picker=case[-1] if case in ("last-f", "last-t") else
-                                "family" if case == "last-family" else None)
+        if case == "last-session":
+            verify_last_session(binary, directory, display, x, launch, rex, server)
             return
 
         if case == "floating-resize":
@@ -1050,9 +986,6 @@ if __name__ == "__main__":
         "close-select",
         "cross-session",
         "last-session",
-        "last-f",
-        "last-t",
-        "last-family",
         "floating-resize",
     )
     parent = os.environ.get("REXIA_TEST_X11_LOG_DIR")

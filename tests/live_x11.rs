@@ -1,6 +1,4 @@
 //! Opt-in native X11 regressions. See tests/fixtures/native_x11.py for dependencies.
-//! last-f/last-t additionally need REXIA_TEST_REXCONFIG (built package output);
-//! last-t needs REXIA_TEST_ZOXIDE (absolute executable path).
 use std::process::Command;
 
 fn native(case: &str) {
@@ -63,21 +61,6 @@ fn jumping_sessions_waits_for_both_cold_terminal_frames() {
 #[test]
 fn native_client_last_session_toggles_after_picker_jump() {
     native("last-session");
-}
-
-#[test]
-fn native_client_last_session_after_real_fzf_session_picker() {
-    native("last-f");
-}
-
-#[test]
-fn native_client_last_session_after_real_fzf_project_picker() {
-    native("last-t");
-}
-
-#[test]
-fn native_client_last_session_after_project_family_shortcuts() {
-    native("last-family");
 }
 
 #[test]

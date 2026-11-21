@@ -60,7 +60,7 @@ fn switching_hosts_keeps_each_clients_host_local_last() {
         second.snapshot().last_selected.as_deref(),
         Some(initial_for_wait.as_str())
     );
-    h.run("session.last", json!({}));
+    h.run("session.recent", json!({}));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while second.snapshot().selected.as_ref() != Some(&initial) {
         assert!(
@@ -72,7 +72,7 @@ fn switching_hosts_keeps_each_clients_host_local_last() {
     }
     assert_eq!(first.snapshot().last_selected.as_deref(), Some(a.as_str()));
     h.run("client.host.switch", json!({"host": "test"}));
-    h.run("session.last", json!({}));
+    h.run("session.recent", json!({}));
     h.wait("first host returns A", |m| {
         (m.selected.as_ref() == Some(&a)).then_some(())
     });

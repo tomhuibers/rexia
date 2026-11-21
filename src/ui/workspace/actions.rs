@@ -630,7 +630,7 @@ impl Workspace {
                 }
                 self.select_session(self.active, id.to_owned(), cx);
             }
-            "session.last" => {
+            "session.recent" | "session.last" => {
                 let id = model.last_selected.as_ref()
                     .ok_or_else(|| refused("There's no last session on this host"))?;
                 if !model.sessions.iter().any(|s| &s.session_id == id) {

@@ -29,7 +29,7 @@ fn per_client_last_session_tracks_actual_selection() {
         window
             .update(cx, |ws, window, cx| {
                 ws.run_action(
-                    "session.last",
+                    "session.recent",
                     json!({}),
                     "palette",
                     Default::default(),
@@ -47,10 +47,11 @@ fn per_client_last_session_tracks_actual_selection() {
         one.host.snapshot().last_selected.as_deref(),
         Some(a.as_str())
     );
-    one.run("session.last", json!({}));
+    one.run("session.recent", json!({}));
     one.wait("back to A", |m| {
         (m.selected.as_ref() == Some(&a)).then_some(())
     });
+    // The legacy alias toggles the very same register back.
     one.run("session.last", json!({}));
     one.wait("back to B", |m| {
         (m.selected.as_ref() == Some(&b)).then_some(())
@@ -72,11 +73,11 @@ fn per_client_last_session_tracks_actual_selection() {
         one.host.snapshot().last_selected.as_deref(),
         Some(b.as_str())
     );
-    one.run("session.last", json!({}));
+    one.run("session.recent", json!({}));
     one.wait("C to B", |m| {
         (m.selected.as_ref() == Some(&b)).then_some(())
     });
-    one.run("session.last", json!({}));
+    one.run("session.recent", json!({}));
     one.wait("B to C", |m| {
         (m.selected.as_ref() == Some(&c)).then_some(())
     });
@@ -129,7 +130,7 @@ fn per_client_last_session_tracks_actual_selection() {
         window
             .update(cx, |ws, window, cx| {
                 ws.run_action(
-                    "session.last",
+                    "session.recent",
                     json!({}),
                     "palette",
                     Default::default(),
@@ -152,7 +153,7 @@ fn per_client_last_session_tracks_actual_selection() {
         window
             .update(cx, |ws, window, cx| {
                 ws.run_action(
-                    "session.last",
+                    "session.recent",
                     json!({}),
                     "palette",
                     Default::default(),

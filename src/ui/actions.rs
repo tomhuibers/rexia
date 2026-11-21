@@ -298,8 +298,17 @@ pub const ACTIONS: &[ActionDef] = &[
         [(&["ctrl+alt+shift+up"], None)]
     ),
     action!(
+        "session.recent",
+        "Go to Recent Session",
+        "Session",
+        "session history recent toggle alternate last return",
+        []
+    ),
+    // Advertise the legacy name too: existing server-side bindings need a
+    // registered client action, not just a local lookup alias.
+    action!(
         "session.last",
-        "Last Session",
+        "Last Session (Compatibility Alias)",
         "Session",
         "return to last viewed session toggle tmux",
         []
@@ -1182,6 +1191,30 @@ pub fn fallback_keymap(shortcuts: &Shortcuts) -> crate::keymap::Keymap {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn recent_session_and_legacy_alias_are_registered_client_actions() {
+        let request = keymap_request(&Shortcuts::new());
+        for name in ["session.recent", "session.last"] {
+            let definition = find(name).unwrap();
+            assert!(definition.keys.is_empty());
+            assert!(
+                request["actions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|action| { action["name"] == name && action["kind"] == "client" })
+            );
+            let shortcuts = Shortcuts::from([(name.into(), vec!["ctrl+a".into(), "l".into()])]);
+            let keymap = fallback_keymap(&shortcuts);
+            assert!(
+                keymap
+                    .bindings
+                    .iter()
+                    .any(|binding| { binding.action == name && binding.keys == ["ctrl+a", "l"] })
+            );
+        }
+    }
 
     #[test]
     fn fallback_keymap_binds_the_palette() {
